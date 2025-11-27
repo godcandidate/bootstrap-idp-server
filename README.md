@@ -1,0 +1,2 @@
+# Bootstrap idp Sever
+This repository contains scripts and configurations to self host an Identity Provider (IdP) server using popular open-source software. The IdP server can be used for authentication and authorization in various applications.
