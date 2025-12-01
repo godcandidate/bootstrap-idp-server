@@ -1,0 +1,12 @@
+.env
+
+# terraform files
+*.tfstate
+*.tfstate.backup
+.terraform*
+
+.infracost
+
+# Ansible file
+*server.yaml
+*vars.env
