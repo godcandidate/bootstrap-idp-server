@@ -1,0 +1,198 @@
+- name: Install Docker and Start app on Ubuntu server
+  hosts: app-server
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Install prerequisite packages
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+          - gnupg
+        state: present
+        update_cache: yes
+
+    - name: Add Docker GPG key
+      ansible.builtin.apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker APT repository
+      apt_repository:
+        repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+        state: present
+        filename: docker
+
+    - name: Update APT cache
+      apt:
+        update_cache: yes
+
+    - name: Install Docker packages
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+
+    - name: Ensure Docker service is running and enabled
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add ubuntu user to docker group
+      user:
+        name: ubuntu
+        groups: docker
+        append: yes
+
+    - name: Create n8n-app directory
+      file:
+        path: /home/ubuntu/idp-server
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Copy idp docker-compose file
+      copy:
+        src: ../../authentik/docker-compose.yml
+        dest: /home/ubuntu/idp-server/docker-compose.yml
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+
+    - name: Copy idp .env file
+      copy:
+        src: ../../authentik/.env
+        dest: /home/ubuntu/idp-server/.env
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+
+    - name: Start IDP containers
+      community.docker.docker_compose:
+        project_src: /home/ubuntu/idp-server
+        state: present
+
+- name: Install NGINX and configure reverse proxy with SSL
+  hosts: app-server
+  gather_facts: yes
+  become: yes
+
+  vars:
+    server_name: "{{ lookup('ini', 'SERVER_NAME value=vars.env') }}"
+    domains:
+      - { server_name: "{{ server_name }}", port: 9000 }
+
+  tasks:
+    - name: Install NGINX
+      apt:
+        name: nginx
+        state: present
+        update_cache: yes
+
+    - name: Ensure NGINX is running and enabled
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Create NGINX config for each domain
+      template:
+        src: nginx_reverse_proxy.j2
+        dest: "/etc/nginx/sites-available/{{ item.server_name }}"
+      loop: "{{ domains }}"
+
+    - name: Enable NGINX sites
+      file:
+        src: "/etc/nginx/sites-available/{{ item.server_name }}"
+        dest: "/etc/nginx/sites-enabled/{{ item.server_name }}"
+        state: link
+        force: yes
+      loop: "{{ domains }}"
+
+    - name: Remove default NGINX site (optional)
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Test NGINX config
+      command: nginx -t
+      register: nginx_test
+
+    - name: Reload NGINX
+      systemd:
+        name: nginx
+        state: reloaded
+
+    - name: Install Certbot and NGINX plugin
+      apt:
+        name:
+          - certbot
+          - python3-certbot-nginx
+        state: present
+
+    - name: Obtain and install SSL certificate with Certbot
+      command: >
+        certbot --nginx --non-interactive --agree-tos
+        -m admin@{{ item.server_name }}
+        -d {{ item.server_name }}
+      loop: "{{ domains }}"
+      notify: Reload NGINX
+
+  handlers:
+    - name: Reload NGINX
+      systemd:
+        name: nginx
+        state: reloaded
+
+- name: Create swapfile
+  hosts: app-server
+  become: yes
+  tasks:
+
+    - name: Allocate 2G swapfile if not exists
+      command: fallocate -l 2G /swapfile
+      args:
+        creates: /swapfile
+
+    - name: Set correct permissions on swapfile
+      file:
+        path: /swapfile
+        mode: '0600'
+
+    - name: Setup swap area
+      command: mkswap /swapfile
+      args:
+        creates: /swapfile_created
+      register: mkswap_output
+      changed_when: "'setting up swapspace' in mkswap_output.stdout"
+
+    - name: Enable swap
+      command: swapon /swapfile
+      when: mkswap_output is changed
+
+    - name: Add swap entry to fstab
+      mount:
+        name: none
+        src: /swapfile
+        fstype: swap
+        opts: sw
+        state: present
+
+    - name: Verify swap is active
+      command: swapon --show
+      register: swap_status
+      changed_when: false
+
+    - debug:
+        var: swap_status.stdout
+
+

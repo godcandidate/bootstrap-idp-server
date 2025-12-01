@@ -1,0 +1,3 @@
+ansible_host: server_ip
+ansible_user: server_user_name
+ansible_ssh_private_key_file: path_to_ssh_key
